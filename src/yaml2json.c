@@ -46,11 +46,11 @@ int yaml_parse_file(const char * path, yaml_document_t * document) {
         }
 
         yaml_parser_delete(&parser);
-        fclose(finput);
     } else {
         mwarn("Cannot open file '%s': %s (%d)", path, strerror(errno), errno);
     }
 
+    fclose(finput);
     return error;
 }
 
