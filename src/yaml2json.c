@@ -1,121 +1,146 @@
 // August 4, 2018
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <yaml2json.h>
 
-#define merror(format, ...) fprintf(stderr, "ERROR: " format "\n", ##__VA_ARGS__)
-#define minfo(format, ...) fprintf(stderr, "INFO: " format "\n", ##__VA_ARGS__)
-#define mwarn(format, ...) fprintf(stderr, "WARNING: " format "\n", ##__VA_ARGS__)
+static yaml_event_type_t _parse_get_event_type(yaml_parser_t * parser);
+static cJSON * _parse_document(yaml_parser_t * parser);
+static cJSON * _parse_node(yaml_parser_t * parser);
+static cJSON * _parse_scalar(const yaml_event_t * event);
+static cJSON * _parse_sequence(yaml_parser_t * parser);
+static cJSON * _parse_mapping(yaml_parser_t * parser);
 
-static cJSON * yaml2json_node(yaml_document_t * document, yaml_node_t * node);
-
-int yaml_parse_stdin(yaml_document_t * document) {
-    yaml_parser_t parser;
-    int error = -1;
-
-    yaml_parser_initialize(&parser);
-    yaml_parser_set_input_file(&parser, stdin);
-
-    if (yaml_parser_load(&parser, document)) {
-        error = 0;
-    } else {
-        mwarn("Failed to load YAML document at line %lu", parser.problem_mark.line);
-    }
-
-    yaml_parser_delete(&parser);
-
-    return error;
-}
-
-int yaml_parse_file(const char * path, yaml_document_t * document) {
-    yaml_parser_t parser;
-    FILE * finput;
-    int error = -1;
-
-    if (finput = fopen(path, "rb"), finput) {
-        yaml_parser_initialize(&parser);
-        yaml_parser_set_input_file(&parser, finput);
-
-        if (yaml_parser_load(&parser, document)) {
-            error = 0;
-        } else {
-            mwarn("Failed to load YAML document in %s:%lu", path, parser.problem_mark.line);
-        }
-
-        yaml_parser_delete(&parser);
-    } else {
-        mwarn("Cannot open file '%s': %s (%d)", path, strerror(errno), errno);
-    }
-
-    fclose(finput);
-    return error;
-}
-
-cJSON * yaml2json(yaml_document_t * document) {
-    yaml_node_t * node;
-
-    if (node = yaml_document_get_root_node(document), !node) {
-        mwarn("No document defined.");
+cJSON * yaml2json(yaml_parser_t * parser) {
+    if (_parse_get_event_type(parser) != YAML_STREAM_START_EVENT) {
         return NULL;
     }
 
-    return yaml2json_node(document, node);
-}
+    cJSON * object = _parse_document(parser);
 
-cJSON * yaml2json_node(yaml_document_t * document, yaml_node_t * node) {
-    yaml_node_t * key;
-    yaml_node_t * value;
-    yaml_node_item_t * item_i;
-    yaml_node_pair_t * pair_i;
-    double number;
-    char * scalar;
-    char * end;
-    cJSON * object;
-
-    switch (node->type) {
-    case YAML_NO_NODE:
-        object = cJSON_CreateObject();
-        break;
-
-    case YAML_SCALAR_NODE:
-        scalar = (char *)node->data.scalar.value;
-        number = strtod(scalar, &end);
-        object = (end == scalar || *end) ? cJSON_CreateString(scalar) : cJSON_CreateNumber(number);
-        break;
-
-    case YAML_SEQUENCE_NODE:
-        object = cJSON_CreateArray();
-
-        for (item_i = node->data.sequence.items.start; item_i < node->data.sequence.items.top; ++item_i) {
-            cJSON_AddItemToArray(object, yaml2json_node(document, yaml_document_get_node(document, *item_i)));
-        }
-
-        break;
-
-    case YAML_MAPPING_NODE:
-        object = cJSON_CreateObject();
-
-        for (pair_i = node->data.mapping.pairs.start; pair_i < node->data.mapping.pairs.top; ++pair_i) {
-            key = yaml_document_get_node(document, pair_i->key);
-            value = yaml_document_get_node(document, pair_i->value);
-
-            if (key->type != YAML_SCALAR_NODE) {
-                mwarn("Mapping key is not scalar (line %lu).", key->start_mark.line);
-                continue;
-            }
-
-            cJSON_AddItemToObject(object, (char *)key->data.scalar.value, yaml2json_node(document, value));
-        }
-
-        break;
-
-    default:
-        mwarn("Unknown node type (line %lu).", node->start_mark.line);
-        object = NULL;
+    if (_parse_get_event_type(parser) != YAML_STREAM_END_EVENT) {
+        cJSON_Delete(object);
+        return NULL;
     }
 
+    return object;
+}
+
+yaml_event_type_t _parse_get_event_type(yaml_parser_t * parser) {
+    yaml_event_t event;
+
+    if (!yaml_parser_parse(parser, &event)) {
+        return YAML_NO_EVENT;
+    }
+
+    yaml_event_type_t type = event.type;
+    yaml_event_delete(&event);
+
+    return type;
+}
+
+cJSON * _parse_document(yaml_parser_t * parser) {
+    if (_parse_get_event_type(parser) != YAML_DOCUMENT_START_EVENT) {
+        return NULL;
+    }
+
+    cJSON * object = _parse_node(parser);
+
+    if (_parse_get_event_type(parser) != YAML_DOCUMENT_END_EVENT) {
+        cJSON_Delete(object);
+        return NULL;
+    }
+
+    return object;
+}
+
+cJSON * _parse_node(yaml_parser_t * parser) {
+    yaml_event_t event;
+    cJSON * object = NULL;
+
+    if (!yaml_parser_parse(parser, &event)) {
+        return NULL;
+    }
+
+    switch (event.type) {
+    case YAML_ALIAS_EVENT:
+        // TODO: Alias unsupported.
+        break;
+
+    case YAML_SCALAR_EVENT:
+        object = _parse_scalar(&event);
+        break;
+
+    case YAML_SEQUENCE_START_EVENT:
+        object = _parse_sequence(parser);
+        break;
+
+    case YAML_MAPPING_START_EVENT:
+        object = _parse_mapping(parser);
+
+    default:
+        break;
+    }
+
+    yaml_event_delete(&event);
+    return object;
+}
+
+cJSON * _parse_scalar(const yaml_event_t * event) {
+    const char * value = (const char *)event->data.scalar.value;
+
+    if (strcmp(value, "true") == 0) {
+        return cJSON_CreateTrue();
+    } else if (strcmp(value, "false") == 0) {
+        return cJSON_CreateFalse();
+    } else if (strcmp(value, "null") == 0) {
+        return cJSON_CreateNull();
+    } else {
+        char * end;
+        double number = strtod(value, &end);
+
+        if (*end == '\0') {
+            return cJSON_CreateNumber(number);
+        } else {
+            return cJSON_CreateString(value);
+        }
+    }
+}
+
+cJSON * _parse_sequence(yaml_parser_t * parser) {
+    cJSON * array = cJSON_CreateArray();
+    cJSON * object = _parse_node(parser);
+
+    while (object != NULL) {
+        cJSON_AddItemToArray(array, object);
+        object = _parse_node(parser);
+    }
+
+    return array;
+}
+
+cJSON * _parse_mapping(yaml_parser_t * parser) {
+    yaml_event_t event;
+
+    if (!yaml_parser_parse(parser, &event)) {
+        return NULL;
+    }
+
+    cJSON * object = cJSON_CreateObject();
+
+    while (event.type != YAML_MAPPING_END_EVENT) {
+        if (event.type != YAML_SCALAR_EVENT) {
+            break;
+        }
+
+        cJSON_AddItemToObject(object, (const char *)event.data.scalar.value, _parse_node(parser));
+        yaml_event_delete(&event);
+
+        if (!yaml_parser_parse(parser, &event)) {
+            break;
+        }
+    }
+
+    yaml_event_delete(&event);
     return object;
 }
